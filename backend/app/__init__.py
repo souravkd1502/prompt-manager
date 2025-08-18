@@ -90,13 +90,12 @@ def create_app() -> FastAPI:
             title=app.title,
             version=app.version,
             description=app.description,
-            routes=app.routes,   # <-- ensures all routers + models are included
+            routes=app.routes,  # <-- ensures all routers + models are included
         )
         # Add branding/logo without removing schemas
         openapi_schema["info"]["x-logo"] = {
-            "url": "https://your-company.com/static/logo.png"
+            "url": "https://cdn-icons-png.flaticon.com/512/4727/4727496.png"
         }
-
         # Ensure components (models) are preserved
         if "components" not in openapi_schema:
             openapi_schema["components"] = {}

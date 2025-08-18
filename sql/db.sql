@@ -1,85 +1,164 @@
--- ========== 1. Tenants ==========
+-- ============================================
+-- 1. Tenants
+-- ============================================
 CREATE TABLE tenants (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
-    name TEXT NOT NULL UNIQUE,
-    created_at TIMESTAMP DEFAULT now()
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT UNIQUE NOT NULL,                          -- Unique tenant name
+    settings JSONB DEFAULT '{}'::jsonb,                 -- Configurable tenant settings
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- ========== 2. Users ==========
+CREATE INDEX idx_tenants_name ON tenants (name);        -- Optimize lookups by name
+
+
+-- ============================================
+-- 2. Users
+-- ============================================
+CREATE EXTENSION IF NOT EXISTS citext;                  -- For case-insensitive emails
+
 CREATE TABLE users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
-    tenant_id UUID NOT NULL,
-    username TEXT NOT NULL,
-    email TEXT UNIQUE,
-    created_at TIMESTAMP DEFAULT now(),
-    CONSTRAINT fk_users_tenant FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email CITEXT UNIQUE NOT NULL,                       -- Case-insensitive uniqueness
+    password_hash TEXT NOT NULL,                        -- Store hash, not raw password
+    name TEXT,
+    status TEXT DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- ========== 3. Prompts ==========
+CREATE INDEX idx_users_email ON users (email);
+
+
+-- ============================================
+-- 3. Memberships (Many-to-Many: Users <-> Tenants)
+-- ============================================
+CREATE TABLE memberships (
+    user_id UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'editor', 'viewer')),
+    PRIMARY KEY (user_id, tenant_id)
+);
+
+CREATE INDEX idx_memberships_tenant ON memberships (tenant_id);
+CREATE INDEX idx_memberships_user ON memberships (user_id);
+
+
+-- ============================================
+-- 4. Prompts
+-- ============================================
 CREATE TABLE prompts (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
-    tenant_id UUID NOT NULL,
-    created_by UUID,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
+    created_by UUID REFERENCES users (id),
     title TEXT NOT NULL,
     description TEXT,
     is_archived BOOLEAN DEFAULT FALSE,
-    current_version_id UUID, -- Points to latest version
-    created_at TIMESTAMP DEFAULT now(),
-    updated_at TIMESTAMP DEFAULT now(),
-    CONSTRAINT fk_prompts_tenant FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE,
-    CONSTRAINT fk_prompts_created_by FOREIGN KEY (created_by) REFERENCES users (id),
-    CONSTRAINT fk_prompts_current_version FOREIGN KEY (current_version_id) REFERENCES prompt_versions (id)
+    current_version_id UUID, -- Latest version pointer
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- ========== 4. Prompt Versions ==========
+-- Indexes for common query patterns
+CREATE INDEX idx_prompts_tenant ON prompts (tenant_id);
+CREATE INDEX idx_prompts_created_by ON prompts (created_by);
+CREATE INDEX idx_prompts_is_archived ON prompts (tenant_id, is_archived);
+CREATE INDEX idx_prompts_title_search ON prompts (title);
+
+
+-- ============================================
+-- 5. Prompt Versions
+-- ============================================
 CREATE TABLE prompt_versions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
-    prompt_id UUID NOT NULL,
-    version_number INTEGER NOT NULL,
-    body TEXT NOT NULL,
-    style TEXT,
-    created_by UUID,
-    created_at TIMESTAMP DEFAULT now(),
-    CONSTRAINT fk_prompt_versions_prompt FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE CASCADE,
-    CONSTRAINT fk_prompt_versions_created_by FOREIGN KEY (created_by) REFERENCES users (id),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    prompt_id UUID NOT NULL REFERENCES prompts (id) ON DELETE CASCADE,
+    version_number INTEGER NOT NULL,                    -- Sequential versioning
+    body TEXT NOT NULL,                                 -- Actual prompt text
+    style TEXT,                                         -- Optional formatting/style
+    created_by UUID REFERENCES users (id),
+    created_at TIMESTAMPTZ DEFAULT now(),
     CONSTRAINT unique_prompt_version UNIQUE (prompt_id, version_number)
 );
 
--- ========== 5. Prompt Metadata ==========
+-- Indexes
+CREATE INDEX idx_prompt_versions_prompt ON prompt_versions (prompt_id);
+CREATE INDEX idx_prompt_versions_latest ON prompt_versions (prompt_id DESC, version_number DESC);
+
+
+-- ============================================
+-- 6. Prompt Metadata (Key-Value Pairs)
+-- ============================================
 CREATE TABLE prompt_metadata (
     id SERIAL PRIMARY KEY,
-    prompt_id UUID NOT NULL,
+    prompt_id UUID NOT NULL REFERENCES prompts (id) ON DELETE CASCADE,
     key TEXT NOT NULL,
     value TEXT,
-    CONSTRAINT fk_prompt_metadata_prompt FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE CASCADE
+    CONSTRAINT unique_prompt_metadata UNIQUE (prompt_id, key) -- Prevent duplicate keys
 );
 
--- ========== 6. Prompt Tags ==========
+CREATE INDEX idx_prompt_metadata_key ON prompt_metadata (key);
+CREATE INDEX idx_prompt_metadata_prompt ON prompt_metadata (prompt_id);
+
+
+-- ============================================
+-- 7. Prompt Tags
+-- ============================================
 CREATE TABLE prompt_tags (
     id SERIAL PRIMARY KEY,
-    prompt_id UUID NOT NULL,
-    tag TEXT,
-    CONSTRAINT fk_prompt_tags_prompt FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE CASCADE
+    prompt_id UUID NOT NULL REFERENCES prompts (id) ON DELETE CASCADE,
+    tag TEXT NOT NULL
 );
 
--- ========== 7. Audit Log ==========
+CREATE INDEX idx_prompt_tags_tag ON prompt_tags (tag);
+CREATE INDEX idx_prompt_tags_prompt ON prompt_tags (prompt_id);
+
+
+-- ============================================
+-- 8. Audit Log
+-- ============================================
 CREATE TABLE audit_log (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
-    prompt_id UUID NOT NULL,
-    user_id UUID,
-    action TEXT CHECK (
-        action IN (
-            'create',
-            'update',
-            'rollback',
-            'delete'
-        )
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    prompt_id UUID NOT NULL REFERENCES prompts (id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users (id),
+    action TEXT NOT NULL CHECK (
+        action IN ('create', 'update', 'rollback', 'delete')
     ),
-    old_version UUID,
-    new_version UUID,
-    timestamp TIMESTAMP DEFAULT now(),
-    CONSTRAINT fk_audit_log_prompt FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE CASCADE,
-    CONSTRAINT fk_audit_log_user FOREIGN KEY (user_id) REFERENCES users (id),
-    CONSTRAINT fk_audit_log_old_version FOREIGN KEY (old_version) REFERENCES prompt_versions (id),
-    CONSTRAINT fk_audit_log_new_version FOREIGN KEY (new_version) REFERENCES prompt_versions (id)
+    old_version UUID REFERENCES prompt_versions (id),
+    new_version UUID REFERENCES prompt_versions (id),
+    timestamp TIMESTAMPTZ DEFAULT now()
 );
+
+CREATE INDEX idx_audit_log_prompt ON audit_log (prompt_id);
+CREATE INDEX idx_audit_log_user ON audit_log (user_id);
+CREATE INDEX idx_audit_log_action ON audit_log (action);
+
+
+-- ============================================
+-- 9. Refresh Tokens
+-- ============================================
+CREATE TABLE refresh_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX idx_refresh_tokens_user ON refresh_tokens (user_id);
+CREATE INDEX idx_refresh_tokens_valid ON refresh_tokens (user_id, revoked, expires_at);
+
+
+-- ============================================
+-- 10. API Keys
+-- ============================================
+CREATE TABLE api_keys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants (id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    hash TEXT UNIQUE NOT NULL, -- Secure hash
+    prefix TEXT NOT NULL,      -- Short identifier for logging
+    created_at TIMESTAMPTZ DEFAULT now(),
+    last_used_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_api_keys_tenant ON api_keys (tenant_id);
+CREATE INDEX idx_api_keys_prefix ON api_keys (prefix);
