@@ -26,19 +26,10 @@ def setup_logging(level: int = logging.INFO) -> None:
         level=level,
         format=log_format,
         handlers=[logging.StreamHandler(sys.stdout)],
+        force=True,  # Force reconfiguration even if logging was already configured
     )
 
-    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)  # Reduce SQLAlchemy noise
-
-
-def get_logger(name: str) -> logging.Logger:
-    """
-    Get a module-specific logger.
-
-    Args:
-        name (str): Logger name (usually __name__).
-
-    Returns:
-        logging.Logger: Configured logger instance.
-    """
-    return logging.getLogger(name)
+    
+    # Log that logging has been initialized
+    logger = logging.getLogger(__name__)
+    logger.info("Logging system initialized successfully")

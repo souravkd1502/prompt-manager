@@ -45,14 +45,12 @@ class Prompt(Base):
     __tablename__ = "prompts"
 
     id = Column(String, primary_key=True, index=True)  # UUID stored as string
-    tenant_id = Column(
-        String, ForeignKey("tenants.id", ondelete="CASCADE"), index=True, nullable=False
-    )
-    created_by = Column(String, ForeignKey("users.id"), nullable=True)
+    tenant_id = Column(String, index=True, nullable=False)
+    created_by = Column(String, nullable=True)
     title = Column(String, nullable=False, index=True)
     description = Column(Text, nullable=True)
     is_archived = Column(Boolean, default=False)
-    current_version_id = Column(String, ForeignKey("prompt_versions.id"), nullable=True)
+    current_version_id = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(tz=timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(tz=timezone.utc))
 
@@ -60,7 +58,7 @@ class Prompt(Base):
     versions = relationship(
         "PromptVersion", back_populates="prompt", cascade="all, delete-orphan"
     )
-    metadata = relationship(
+    prompt_metadata = relationship(
         "PromptMetadata", back_populates="prompt", cascade="all, delete-orphan"
     )
     tags = relationship(
@@ -94,7 +92,7 @@ class PromptVersion(Base):
     version_number = Column(Integer, nullable=False)
     body = Column(Text, nullable=False)
     style = Column(Text, nullable=True)
-    created_by = Column(String, ForeignKey("users.id"), nullable=True)
+    created_by = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(tz=timezone.utc))
 
     # Ensure each prompt version number is unique for a given prompt
@@ -135,7 +133,7 @@ class PromptMetadata(Base):
     )
 
     # Relationship back to Prompt
-    prompt = relationship("Prompt", back_populates="metadata")
+    prompt = relationship("Prompt", back_populates="prompt_metadata")
 
 
 class PromptTag(Base):

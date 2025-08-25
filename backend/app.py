@@ -1,33 +1,30 @@
 """
-app/__init__.py
------------------
-
-This module creates and configures the FastAPI application, initializes database connections, and registers routers.
+Application entry point and FastAPI initialization for the Prompt Manager backend.
 """
 
-# Import dependencies
-from fastapi import FastAPI
+import sys
+import os
 
-# Custom libraries
-from backend.api import prompts  # APIs related to Prompts (Create, edit, etc)
-from backend.core.database import init_db  # Database initialization
-from backend.utils.logger import setup_logging  # Logging
-
+# Add project root to sys.path to ensure backend imports work correctly
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
+import uvicorn
+
+# Custom libraries
+from backend.api import prompts  # APIs related to Prompts
+from backend.core.database import init_db  # Database initialization
+from backend.utils.logger import setup_logging  # Logging
 
 
 def create_app() -> FastAPI:
     """
     Create and configure the FastAPI application with detailed OpenAPI metadata.
-
     Returns:
         FastAPI: Configured FastAPI app instance.
     """
-    # Setup logging before app creation
-    setup_logging()
 
     app = FastAPI(
         title="Prompt Manager",
@@ -44,21 +41,16 @@ def create_app() -> FastAPI:
         summary="Centralized Prompt Management API",
         contact={
             "name": "Sourav Das",
-            "email": "ssourav.bt.kt@gmail.com",
+            "email": "sourav.bt.kt@gmail.com",
         },
         license_info={
             "name": "MIT License",
             "url": "https://opensource.org/licenses/MIT",
         },
-        terms_of_service="https://your-company.com/terms",
         openapi_tags=[
             {
                 "name": "Prompts",
                 "description": "Operations related to managing prompts, including creation, versioning, and retrieval.",
-            },
-            {
-                "name": "Analytics",
-                "description": "Endpoints for analyzing prompt usage and performance.",
             },
         ],
         docs_url="/docs",
@@ -66,14 +58,10 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json",
     )
 
-    # Initialize database
-    init_db()
-
     # Register routers
     app.include_router(prompts.router, prefix="/prompts", tags=["Prompts"])
-    # (example) app.include_router(analytics.router, prefix="/analytics", tags=["Analytics"])
 
-    # Enable CORS (optional)
+    # Enable CORS
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],  # Adjust for production
@@ -90,13 +78,13 @@ def create_app() -> FastAPI:
             title=app.title,
             version=app.version,
             description=app.description,
-            routes=app.routes,  # <-- ensures all routers + models are included
+            routes=app.routes,
         )
-        # Add branding/logo without removing schemas
+        # Add branding/logo
         openapi_schema["info"]["x-logo"] = {
             "url": "https://cdn-icons-png.flaticon.com/512/4727/4727496.png"
         }
-        # Ensure components (models) are preserved
+        # Ensure components (models) exist
         if "components" not in openapi_schema:
             openapi_schema["components"] = {}
         if "schemas" not in openapi_schema["components"]:
@@ -105,11 +93,22 @@ def create_app() -> FastAPI:
         app.openapi_schema = openapi_schema
         return app.openapi_schema
 
-    # Assign the custom OpenAPI function to the app
     app.openapi = custom_openapi
+
+    # Startup event
+    @app.on_event("startup")
+    def startup_event():
+        """Initialize database and logging on application startup."""
+        setup_logging()
+        init_db()
 
     return app
 
 
-# Expose the app instance for ASGI servers (uvicorn/gunicorn)
+# Expose FastAPI app for ASGI servers
 app = create_app()
+
+
+if __name__ == "__main__":
+    # Run the application directly with: python app.py
+    uvicorn.run("backend.app:app", host="0.0.0.0", port=8000, reload=True)

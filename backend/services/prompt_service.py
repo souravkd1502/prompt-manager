@@ -1,38 +1,41 @@
 """
-SQLAlchemy models for logs and analytics.
------------------------------------------
+SQLAlchemy models and services for prompts and versions.
+--------------------------------------------------------
 
 Functionality
 ----------------
-Defines the `AuditLog` model to record audit trail events such as
-create, update, rollback, and delete actions performed on prompts.
-Captures details about the prompt, user, old version, new version,
-and the timestamp of the action.
+Provides CRUD operations, versioning, duplication, and rollback 
+features for `Prompt` entities. Uses SQLAlchemy ORM with synchronous 
+sessions to ensure blocking DB interactions. Also integrates 
+logging, exception handling, and audit-friendly design.
 
 Usage
 ---------
-- Import the model in database migration and session logic.
-- Use it to persist audit records whenever a prompt-related action occurs.
-- Query the table for analytics, accountability, and debugging.
+- Import functions in FastAPI routes to manage prompts.
+- Each function is synchronous and expects a `Session`.
+- Used for prompt creation, update, duplication, rollback, and deletion.
 
 Requirements
 -----------------
-- SQLAlchemy ORM
-- A database engine supported by SQLAlchemy
-- Models: `prompts`, `users`, `prompt_versions`
+- SQLAlchemy (sync engine)
+- FastAPI
+- Database models: `Prompt`, `PromptVersion`
+- Logging configuration
 
 TODO
 --------
-- Add indexing on frequently queried fields (e.g., `user_id`, `action`, `timestamp`)
-- Implement relationship properties for easier joins with `Prompt`, `User`, and `PromptVersion`
+- Add caching layer for frequently accessed prompts.
+- Implement soft-delete instead of permanent deletion.
+- Add audit logging integration with `AuditLog`.
 
 FIXME
 --------
-- None identified at present
+- Ensure tenant-based filtering (multi-tenancy).
+- Revisit transaction rollback handling for distributed setups.
 
 Created By
 -------------
-Your Name
+Sourav Das
 
 Date
 --------
@@ -40,12 +43,16 @@ Date
 """
 
 # Import Dependencies
+import logging
+import uuid
+from datetime import datetime, timezone
+from typing import Optional, List
+
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from fastapi import HTTPException
-from datetime import datetime, timezone
-import logging
-from typing import Optional, List
+from sqlalchemy.orm import selectinload
 
 from backend.models.prompt import Prompt, PromptVersion
 from backend.schemas.prompt_schemas import PromptCreate, PromptUpdate
@@ -55,6 +62,10 @@ logger = logging.getLogger(__name__)
 
 DETAIL = "Prompt not found"
 
+
+# -------------------------------
+# CRUD Service Functions
+# -------------------------------
 
 def create_prompt(
     db: Session, prompt: PromptCreate, user_id: Optional[str] = None
@@ -74,7 +85,11 @@ def create_prompt(
         HTTPException: If database operation fails.
     """
     try:
+        # Generate UUID for the prompt
+        prompt_id = str(uuid.uuid4())
+        
         new_prompt = Prompt(
+            id=prompt_id,
             tenant_id=prompt.tenant_id,
             title=prompt.title,
             description=prompt.description,
@@ -85,7 +100,9 @@ def create_prompt(
         db.add(new_prompt)
         db.flush()  # Ensure new_prompt.id is available
 
+        version_id = str(uuid.uuid4())
         first_version = PromptVersion(
+            id=version_id,
             prompt_id=new_prompt.id,
             version_number=1,
             body=prompt.body,
@@ -101,18 +118,18 @@ def create_prompt(
         db.commit()
         db.refresh(new_prompt)
 
-        logger.info(f"Prompt created: id={new_prompt.id}, title={new_prompt.title}")
+        logger.info("Prompt created: id=%s, title=%s", new_prompt.id, new_prompt.title)
         return new_prompt
 
     except SQLAlchemyError as e:
         db.rollback()
-        logger.error(f"Failed to create prompt: {e}")
+        logger.error("Failed to create prompt: %s", str(e))
         raise HTTPException(status_code=500, detail="Failed to create prompt")
 
 
 def get_prompts(db: Session, skip: int = 0, limit: int = 20) -> List[Prompt]:
     """
-    Retrieve a paginated list of Prompts.
+    Retrieve a paginated list of Prompts with eager loading.
 
     Args:
         db (Session): SQLAlchemy session.
@@ -122,7 +139,13 @@ def get_prompts(db: Session, skip: int = 0, limit: int = 20) -> List[Prompt]:
     Returns:
         List[Prompt]: List of prompts.
     """
-    return db.query(Prompt).offset(skip).limit(limit).all()
+    result = db.execute(
+        select(Prompt)
+        .options(selectinload(Prompt.versions))
+        .offset(skip)
+        .limit(limit)
+    )
+    return result.scalars().all()
 
 
 def get_prompt(db: Session, prompt_id: str) -> Optional[Prompt]:
@@ -136,7 +159,12 @@ def get_prompt(db: Session, prompt_id: str) -> Optional[Prompt]:
     Returns:
         Optional[Prompt]: The Prompt if found, else None.
     """
-    return db.query(Prompt).filter(Prompt.id == prompt_id).first()
+    result = db.execute(
+        select(Prompt)
+        .options(selectinload(Prompt.current_version))
+        .filter(Prompt.id == prompt_id)
+    )
+    return result.scalars().first()
 
 
 def update_prompt(
@@ -162,21 +190,21 @@ def update_prompt(
     """
     prompt = get_prompt(db, prompt_id)
     if not prompt:
-        logger.warning(f"Update failed: prompt_id={prompt_id} not found")
+        logger.warning("Update failed: prompt_id=%s not found", prompt_id)
         raise HTTPException(status_code=404, detail=DETAIL)
 
     try:
-        latest_version = (
-            db.query(PromptVersion)
+        result = db.execute(
+            select(PromptVersion)
             .filter(PromptVersion.prompt_id == prompt_id)
             .order_by(PromptVersion.version_number.desc())
-            .first()
         )
-        new_version_number = (
-            (latest_version.version_number + 1) if latest_version else 1
-        )
+        latest_version = result.scalars().first()
+        new_version_number = (latest_version.version_number + 1) if latest_version else 1
 
+        version_id = str(uuid.uuid4())
         new_version = PromptVersion(
+            id=version_id,
             prompt_id=prompt_id,
             version_number=new_version_number,
             body=prompt_update.body,
@@ -193,12 +221,14 @@ def update_prompt(
         db.commit()
         db.refresh(prompt)
 
-        logger.info(f"Prompt updated: id={prompt_id}, new_version={new_version_number}")
+        logger.info(
+            "Prompt updated: id=%s, new_version=%s", prompt_id, new_version_number
+        )
         return prompt
 
     except SQLAlchemyError as e:
         db.rollback()
-        logger.error(f"Failed to update prompt {prompt_id}: {e}")
+        logger.error("Failed to update prompt %s: %s", prompt_id, str(e))
         raise HTTPException(status_code=500, detail="Failed to update prompt")
 
 
@@ -215,16 +245,16 @@ def delete_prompt(db: Session, prompt_id: str) -> None:
     """
     prompt = get_prompt(db, prompt_id)
     if not prompt:
-        logger.warning(f"Delete failed: prompt_id={prompt_id} not found")
+        logger.warning("Delete failed: prompt_id=%s not found", prompt_id)
         raise HTTPException(status_code=404, detail=DETAIL)
 
     try:
         db.delete(prompt)
         db.commit()
-        logger.info(f"Prompt deleted: id={prompt_id}")
+        logger.info("Prompt deleted: id=%s", prompt_id)
     except SQLAlchemyError as e:
         db.rollback()
-        logger.error(f"Failed to delete prompt {prompt_id}: {e}")
+        logger.error("Failed to delete prompt %s: %s", prompt_id, str(e))
         raise HTTPException(status_code=500, detail="Failed to delete prompt")
 
 
@@ -247,18 +277,19 @@ def duplicate_prompt(
     """
     existing = get_prompt(db, prompt_id)
     if not existing:
-        logger.warning(f"Duplicate failed: prompt_id={prompt_id} not found")
+        logger.warning("Duplicate failed: prompt_id=%s not found", prompt_id)
         raise HTTPException(status_code=404, detail=DETAIL)
 
     try:
         # Get current version content for duplication
-        latest_version = (
-            db.query(PromptVersion)
-            .filter(PromptVersion.id == existing.current_version_id)
-            .first()
+        result = db.execute(
+            select(PromptVersion).filter(PromptVersion.id == existing.current_version_id)
         )
+        latest_version = result.scalars().first()
 
+        new_prompt_id = str(uuid.uuid4())
         new_prompt = Prompt(
+            id=new_prompt_id,
             tenant_id=existing.tenant_id,
             title=f"{existing.title}_copy",
             description=existing.description,
@@ -269,7 +300,9 @@ def duplicate_prompt(
         db.add(new_prompt)
         db.flush()
 
+        first_version_id = str(uuid.uuid4())
         first_version = PromptVersion(
+            id=first_version_id,
             prompt_id=new_prompt.id,
             version_number=1,
             body=latest_version.body if latest_version else "",
@@ -285,13 +318,15 @@ def duplicate_prompt(
         db.refresh(new_prompt)
 
         logger.info(
-            f"Prompt duplicated: original_id={prompt_id}, new_id={new_prompt.id}"
+            "Prompt duplicated: original_id=%s, new_id=%s",
+            prompt_id,
+            new_prompt.id,
         )
         return new_prompt
 
     except SQLAlchemyError as e:
         db.rollback()
-        logger.error(f"Failed to duplicate prompt {prompt_id}: {e}")
+        logger.error("Failed to duplicate prompt %s: %s", prompt_id, str(e))
         raise HTTPException(status_code=500, detail="Failed to duplicate prompt")
 
 
@@ -313,32 +348,35 @@ def rollback_prompt(
     Raises:
         HTTPException: If the target version is not found or DB operation fails.
     """
-    target = (
-        db.query(PromptVersion)
-        .filter(
+    result = db.execute(
+        select(PromptVersion).filter(
             PromptVersion.prompt_id == prompt_id,
             PromptVersion.version_number == version_number,
         )
-        .first()
     )
+    target = result.scalars().first()
     if not target:
         logger.warning(
-            f"Rollback failed: prompt_id={prompt_id}, version={version_number} not found"
+            "Rollback failed: prompt_id=%s, version=%s not found",
+            prompt_id,
+            version_number,
         )
         raise HTTPException(status_code=404, detail="Target version not found")
 
     try:
-        latest_version = (
-            db.query(PromptVersion)
+        result = db.execute(
+            select(PromptVersion)
             .filter(PromptVersion.prompt_id == prompt_id)
             .order_by(PromptVersion.version_number.desc())
-            .first()
         )
+        latest_version = result.scalars().first()
         new_version_number = (
             (latest_version.version_number + 1) if latest_version else 1
         )
 
+        rollback_version_id = str(uuid.uuid4())
         new_version = PromptVersion(
+            id=rollback_version_id,
             prompt_id=prompt_id,
             version_number=new_version_number,
             body=target.body,
@@ -357,14 +395,20 @@ def rollback_prompt(
         db.refresh(prompt)
 
         logger.info(
-            f"Prompt rolled back: id={prompt_id}, rolled_to_version={version_number}, new_version={new_version_number}"
+            "Prompt rolled back: id=%s, rolled_to_version=%s, new_version=%s",
+            prompt_id,
+            version_number,
+            new_version_number,
         )
         return prompt
 
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(
-            f"Failed to rollback prompt {prompt_id} to version {version_number}: {e}"
+            "Failed to rollback prompt %s to version %s: %s",
+            prompt_id,
+            version_number,
+            str(e),
         )
         raise HTTPException(status_code=500, detail="Failed to rollback prompt")
 
@@ -380,9 +424,9 @@ def get_versions(db: Session, prompt_id: str) -> List[PromptVersion]:
     Returns:
         List[PromptVersion]: List of versions for the given prompt.
     """
-    return (
-        db.query(PromptVersion)
+    result = db.execute(
+        select(PromptVersion)
         .filter(PromptVersion.prompt_id == prompt_id)
         .order_by(PromptVersion.version_number.asc())
-        .all()
     )
+    return result.scalars().all()
