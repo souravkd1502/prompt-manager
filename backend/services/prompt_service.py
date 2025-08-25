@@ -161,7 +161,7 @@ def get_prompt(db: Session, prompt_id: str) -> Optional[Prompt]:
     """
     result = db.execute(
         select(Prompt)
-        .options(selectinload(Prompt.current_version))
+        .options(selectinload(Prompt.current_version_id))
         .filter(Prompt.id == prompt_id)
     )
     return result.scalars().first()

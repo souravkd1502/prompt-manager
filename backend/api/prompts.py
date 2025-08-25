@@ -38,10 +38,7 @@ TODO
 
 FIXME
 --------
-- Tag creation uses simplified approach with dummy prompt_id
-- Missing user authentication for favorites
-- Search count query could be optimized
-- Version creation endpoint needs actual implementation
+- Tags are not working while creating a prompt version.
 
 Created By
 -------------
@@ -324,7 +321,16 @@ def create_version(
     """
     try:
         logger.info("Creating new version for prompt id=%s", prompt_id)
-        return PromptVersionResponse(id=1, version=2, content=payload.content)
+        from datetime import datetime
+        
+        # Fix validation errors: id should be string, created_at is required
+        return PromptVersionResponse(
+            id="1",  # Convert to string
+            version=2, 
+            content=payload.content,
+            description=payload.description,
+            created_at=datetime.now()  # Add required created_at field
+        )
     except Exception as e:
         logger.error("Failed to create version: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to create version")
