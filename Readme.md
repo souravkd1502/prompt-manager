@@ -53,7 +53,7 @@ prompt-manager-v2/
 3. **Initialize the database**
    ```bash
    # The database will be automatically initialized on first run
-   python backend/app/app.py
+   python backend/app.py
    ```
 
 4. **Run the application**
@@ -70,70 +70,6 @@ prompt-manager-v2/
    - ReDoc Documentation: http://localhost:8000/redoc
    - API Endpoints: http://localhost:8000
 
-## API Endpoints
-
-### Prompts Management
-
-| Method   | Endpoint        | Description                           |
-| -------- | --------------- | ------------------------------------- |
-| `POST`   | `/prompts/`     | Create a new prompt                   |
-| `GET`    | `/prompts/`     | List all prompts (paginated)          |
-| `GET`    | `/prompts/{id}` | Get a specific prompt                 |
-| `PUT`    | `/prompts/{id}` | Update a prompt (creates new version) |
-| `DELETE` | `/prompts/{id}` | Delete a prompt                       |
-
-### Version Control
-
-| Method | Endpoint                                    | Description                    |
-| ------ | ------------------------------------------- | ------------------------------ |
-| `GET`  | `/prompts/{id}/versions`                    | List all versions of a prompt  |
-| `POST` | `/prompts/{id}/versions/{version}/rollback` | Rollback to a specific version |
-| `POST` | `/prompts/{id}/duplicate`                   | Duplicate a prompt             |
-
-### Example Usage
-
-```bash
-# Create a new prompt
-curl -X POST "http://localhost:8000/prompts/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Customer Support Template",
-    "description": "Template for customer support responses",
-    "body": "Hello {customer_name}, thank you for contacting us...",
-    "tenant_id": "tenant-123"
-  }'
-
-# List prompts with pagination
-curl "http://localhost:8000/prompts/?skip=0&limit=20"
-
-# Get a specific prompt
-curl "http://localhost:8000/prompts/1"
-
-# Update a prompt (creates new version)
-curl -X PUT "http://localhost:8000/prompts/1" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Updated Customer Support Template",
-    "body": "Hi {customer_name}, thanks for reaching out..."
-  }'
-```
-
-## Database Schema
-
-### Core Models
-
-- **Prompt**: Main prompt entity with metadata and relationships
-- **PromptVersion**: Version history for each prompt
-- **PromptMetadata**: Key-value metadata for prompts
-- **PromptTag**: Tags for categorization and search
-
-### Key Features
-
-- **UUID-based IDs**: Secure, non-sequential identifiers
-- **Soft Deletes**: Archive prompts instead of hard deletion
-- **Tenant Isolation**: Multi-tenant data separation
-- **Version Tracking**: Complete audit trail of changes
-- **Flexible Metadata**: Extensible key-value storage
 
 ## Configuration
 
@@ -144,7 +80,6 @@ Create a `.env` file or set environment variables:
 ```bash
 # Database Configuration
 DATABASE_URL=sqlite:///./prompt_manager.db
-# DATABASE_URL=postgresql://user:password@localhost/prompt_manager
 
 # Application Settings
 APP_NAME=Prompt Manager
