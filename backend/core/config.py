@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     # Database settings
-    DATABASE_URL: str = "sqlite:///./prompt_manager.db"
+    DATABASE_URL: str = "sqlite:///./backend/prompt_manager.db"
 
     # Multi-tenancy (optional future configs)
     DEFAULT_TENANT: str = "public"

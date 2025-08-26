@@ -2,9 +2,11 @@
 -- 1. Tenants
 -- ============================================
 CREATE TABLE tenants (
-    id TEXT PRIMARY KEY,                                -- UUID string
-    name TEXT UNIQUE NOT NULL,                          -- Unique tenant name
-    settings TEXT DEFAULT '{}',                         -- JSON stored as TEXT
+    id INTEGER PRIMARY KEY AUTOINCREMENT,       -- Auto-increment tenant ID
+    name TEXT UNIQUE NOT NULL,                  -- Unique tenant name
+    limit_users INTEGER,                        -- Optional user quota
+    limit_projects INTEGER,                     -- Optional project quota
+    limit_api_requests_per_day INTEGER,         -- Optional daily API quota
     created_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
 );
 
@@ -15,8 +17,8 @@ CREATE INDEX idx_tenants_name ON tenants (name);
 -- 2. Users
 -- ============================================
 CREATE TABLE users (
-    id TEXT PRIMARY KEY,
-    email TEXT NOT NULL COLLATE NOCASE UNIQUE,          -- Case-insensitive email
+    id INTEGER PRIMARY KEY AUTOINCREMENT,       -- Auto-increment user ID
+    email TEXT NOT NULL COLLATE NOCASE UNIQUE,  -- Case-insensitive email
     password_hash TEXT NOT NULL,
     name TEXT,
     status TEXT DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
@@ -30,10 +32,11 @@ CREATE INDEX idx_users_email ON users (email);
 -- 3. Memberships (Users <-> Tenants Many-to-Many)
 -- ============================================
 CREATE TABLE memberships (
-    user_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,       -- Auto-increment membership ID
+    user_id INTEGER NOT NULL,
+    tenant_id INTEGER NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('admin', 'editor', 'viewer')),
-    PRIMARY KEY (user_id, tenant_id),
+    UNIQUE (user_id, tenant_id),                -- Prevent duplicate memberships
     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
     FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE
 );
@@ -46,13 +49,14 @@ CREATE INDEX idx_memberships_user ON memberships (user_id);
 -- 4. Prompts
 -- ============================================
 CREATE TABLE prompts (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    created_by TEXT,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id INTEGER NOT NULL,
+    created_by INTEGER,
     title TEXT NOT NULL,
     description TEXT,
-    is_archived INTEGER DEFAULT 0,                      -- Boolean as INTEGER (0/1)
-    current_version_id TEXT,                            -- Latest version reference
+    prompt_text TEXT NOT NULL,                           -- Store latest active text
+    is_archived INTEGER DEFAULT 0,                       -- Boolean (0/1)
+    current_version_id INTEGER,                          -- Latest version reference
     created_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
     updated_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
     FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE,
@@ -65,55 +69,51 @@ CREATE INDEX idx_prompts_created_by ON prompts (created_by);
 CREATE INDEX idx_prompts_is_archived ON prompts (tenant_id, is_archived);
 CREATE INDEX idx_prompts_title_search ON prompts (title);
 
-
 -- ============================================
 -- 5. Prompt Versions
 -- ============================================
 CREATE TABLE prompt_versions (
-    id TEXT PRIMARY KEY,
-    prompt_id TEXT NOT NULL,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt_id INTEGER NOT NULL,
     version_number INTEGER NOT NULL,
-    body TEXT NOT NULL,
+    prompt_text TEXT NOT NULL,                           -- Actual version text
     style TEXT,
-    created_by TEXT,
+    created_by INTEGER,
     created_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
     FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE CASCADE,
     FOREIGN KEY (created_by) REFERENCES users (id),
-    UNIQUE (prompt_id, version_number)                  -- Prevent duplicate versions
+    UNIQUE (prompt_id, version_number)                   -- Prevent duplicates
 );
 
 CREATE INDEX idx_prompt_versions_prompt ON prompt_versions (prompt_id);
 CREATE INDEX idx_prompt_versions_latest ON prompt_versions (prompt_id, version_number DESC);
 
-
 -- ============================================
--- 6. Prompt Metadata
+-- 6. Tags
 -- ============================================
-CREATE TABLE prompt_metadata (
+CREATE TABLE tags (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    prompt_id TEXT NOT NULL,
-    key TEXT NOT NULL,
-    value TEXT,
-    FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE CASCADE,
-    UNIQUE (prompt_id, key)                             -- Prevent duplicate metadata keys
+    name TEXT NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
 );
 
-CREATE INDEX idx_prompt_metadata_key ON prompt_metadata (key);
-CREATE INDEX idx_prompt_metadata_prompt ON prompt_metadata (prompt_id);
-
+CREATE INDEX idx_tags_name ON tags (name);
 
 -- ============================================
--- 7. Prompt Tags
+-- 7. Prompt ↔ Tags (Many-to-Many bridge table)
 -- ============================================
 CREATE TABLE prompt_tags (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    prompt_id TEXT NOT NULL,
-    tag TEXT NOT NULL,
-    FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE CASCADE
+    prompt_id INTEGER NOT NULL,
+    tag_id INTEGER NOT NULL,
+    assigned_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
+    FOREIGN KEY (prompt_id) REFERENCES prompts (id) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id) REFERENCES tags (id) ON DELETE CASCADE,
+    PRIMARY KEY (prompt_id, tag_id)                      -- Prevent duplicates
 );
 
-CREATE INDEX idx_prompt_tags_tag ON prompt_tags (tag);
 CREATE INDEX idx_prompt_tags_prompt ON prompt_tags (prompt_id);
+CREATE INDEX idx_prompt_tags_tag ON prompt_tags (tag_id);
+
 
 
 -- ============================================

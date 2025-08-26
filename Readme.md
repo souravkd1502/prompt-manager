@@ -181,7 +181,3 @@ gunicorn backend.app:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:80
 - FastAPI framework for the excellent foundation
 - SQLAlchemy for robust ORM capabilities
 - The Python community for amazing tools and libraries
-
----
-
-For more information, visit the [API documentation](http://localhost:8000/docs) or check out the [project repository](https://github.com/your-repo/prompt-manager-v2).
