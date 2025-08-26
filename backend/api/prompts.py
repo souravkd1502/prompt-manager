@@ -39,6 +39,10 @@ TODO
 FIXME
 --------
 - Tags are not working while creating a prompt version.
+- Add filters, sorting to list prompts. Also add info on number of versions
+- update not working, also tags update, is archived, is favorite
+- while creating content is not being saved
+
 
 Created By
 -------------
@@ -250,13 +254,8 @@ def update_prompt(
     try:
         logger.info("Updating prompt id=%s", prompt_id)
 
-        # Create update object for service
-        update_data = type(
-            "PromptUpdate", (), {"body": payload.content, "style": None}
-        )()
-
-        # Update prompt using service
-        updated_prompt = prompt_service.update_prompt(db, prompt_id, update_data)
+        # Pass the actual payload (PromptUpdate) to the service
+        updated_prompt = prompt_service.update_prompt(db, prompt_id, payload)
 
         # Get the current version content
         current_version = None
@@ -270,7 +269,7 @@ def update_prompt(
 
         return PromptResponse(
             id=updated_prompt.id,
-            name=updated_prompt.title,
+            name=updated_prompt.title,  # DB field
             content=current_version.body if current_version else "",
             tenant_id=int(updated_prompt.tenant_id),
             description=updated_prompt.description,

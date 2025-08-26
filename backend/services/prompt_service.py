@@ -160,9 +160,7 @@ def get_prompt(db: Session, prompt_id: str) -> Optional[Prompt]:
         Optional[Prompt]: The Prompt if found, else None.
     """
     result = db.execute(
-        select(Prompt)
-        .options(selectinload(Prompt.current_version_id))
-        .filter(Prompt.id == prompt_id)
+        select(Prompt).filter(Prompt.id == prompt_id)
     )
     return result.scalars().first()
 
@@ -174,19 +172,9 @@ def update_prompt(
     user_id: Optional[str] = None,
 ) -> Prompt:
     """
-    Update a Prompt by creating a new version.
-
-    Args:
-        db (Session): SQLAlchemy session.
-        prompt_id (str): ID of the prompt to update.
-        prompt_update (PromptUpdate): Update schema.
-        user_id (Optional[str]): ID of the user updating the prompt.
-
-    Returns:
-        Prompt: The updated prompt with a new current version.
-
-    Raises:
-        HTTPException: If the prompt is not found or DB operation fails.
+    Update a Prompt. 
+    - If `content` is provided, creates a new PromptVersion.
+    - If only `title` or `description` are provided, updates Prompt fields.
     """
     prompt = get_prompt(db, prompt_id)
     if not prompt:
@@ -194,36 +182,43 @@ def update_prompt(
         raise HTTPException(status_code=404, detail=DETAIL)
 
     try:
-        result = db.execute(
-            select(PromptVersion)
-            .filter(PromptVersion.prompt_id == prompt_id)
-            .order_by(PromptVersion.version_number.desc())
-        )
-        latest_version = result.scalars().first()
-        new_version_number = (latest_version.version_number + 1) if latest_version else 1
+        # Update Prompt fields if provided
+        if prompt_update.title is not None:
+            prompt.title = prompt_update.title
+        if prompt_update.description is not None:
+            prompt.description = prompt_update.description
 
-        version_id = str(uuid.uuid4())
-        new_version = PromptVersion(
-            id=version_id,
-            prompt_id=prompt_id,
-            version_number=new_version_number,
-            body=prompt_update.body,
-            style=prompt_update.style,
-            created_by=user_id,
-            created_at=datetime.now(tz=timezone.utc),
-        )
-        db.add(new_version)
-        db.flush()
+        # If content is provided, create a new version
+        if prompt_update.content is not None:
+            result = db.execute(
+                select(PromptVersion)
+                .filter(PromptVersion.prompt_id == prompt_id)
+                .order_by(PromptVersion.version_number.desc())
+            )
+            latest_version = result.scalars().first()
+            new_version_number = (latest_version.version_number + 1) if latest_version else 1
 
-        prompt.current_version_id = new_version.id
+            version_id = str(uuid.uuid4())
+            new_version = PromptVersion(
+                id=version_id,
+                prompt_id=prompt_id,
+                version_number=new_version_number,
+                body=prompt_update.content,   # ✅ correct mapping
+                created_by=user_id,
+                created_at=datetime.now(tz=timezone.utc),
+            )
+            db.add(new_version)
+            db.flush()
+
+            # Point prompt to the new current version
+            prompt.current_version_id = new_version.id
+
         prompt.updated_at = datetime.now(tz=timezone.utc)
 
         db.commit()
         db.refresh(prompt)
 
-        logger.info(
-            "Prompt updated: id=%s, new_version=%s", prompt_id, new_version_number
-        )
+        logger.info("Prompt updated: id=%s", prompt_id)
         return prompt
 
     except SQLAlchemyError as e:

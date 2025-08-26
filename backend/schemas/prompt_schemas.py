@@ -30,10 +30,9 @@ class PromptUpdate(BaseModel):
     Schema for updating an existing prompt metadata.
     Creates a new version internally if content changes.
     """
-    name: Optional[str] = None
+    title: Optional[str] = None
     description: Optional[str] = None
     content: Optional[str] = None
-
 
 class PromptResponse(PromptBase):
     """
