@@ -4,9 +4,9 @@ SQLAlchemy models and services for prompts and versions.
 
 Functionality
 ----------------
-Provides CRUD operations, versioning, duplication, and rollback 
-features for `Prompt` entities. Uses SQLAlchemy ORM with synchronous 
-sessions to ensure blocking DB interactions. Also integrates 
+Provides CRUD operations, versioning, duplication, and rollback
+features for `Prompt` entities. Uses SQLAlchemy ORM with synchronous
+sessions to ensure blocking DB interactions. Also integrates
 logging, exception handling, and audit-friendly design.
 
 Usage
@@ -45,6 +45,7 @@ Date
 # Import Dependencies
 import logging
 import uuid
+import json
 from datetime import datetime, timezone
 from typing import Optional, List
 
@@ -54,8 +55,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from fastapi import HTTPException
 from sqlalchemy.orm import selectinload
 
-from backend.models.prompt import Prompt, PromptVersion
-from backend.schemas.prompt_schemas import PromptCreate, PromptUpdate
+from backend.models.prompt import Prompt
+from backend.schemas.prompt_schemas import PromptCreateRequest
 
 # Configure module-level logger
 logger = logging.getLogger(__name__)
@@ -67,361 +68,233 @@ DETAIL = "Prompt not found"
 # CRUD Service Functions
 # -------------------------------
 
-def create_prompt(
-    db: Session, prompt: PromptCreate, user_id: Optional[str] = None
-) -> Prompt:
+
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import or_, and_, asc, desc
+from fastapi import HTTPException
+import logging
+
+from backend.schemas.prompt_schemas import PromptListRequest, PromptCreateResponse
+
+logger = logging.getLogger(__name__)
+
+
+def create_prompt(db: Session, prompt: PromptCreateRequest) -> Prompt:
     """
-    Create a new Prompt with its first version.
+    Create a new Prompt with its initial version and optional tags.
+
+    This function handles:
+    - Normalizing tags into JSON for DB storage.
+    - Assigning current_version_id = 1 (first version).
+    - Handling database transactions with rollback on error.
 
     Args:
-        db (Session): SQLAlchemy session.
-        prompt (PromptCreate): Prompt creation schema.
-        user_id (Optional[str]): ID of the user creating the prompt.
+        db (Session): Active SQLAlchemy session.
+        prompt (PromptCreateRequest): Prompt data from request body.
 
     Returns:
-        Prompt: The newly created prompt with its first version.
+        Prompt: Newly created prompt ORM object.
 
     Raises:
         HTTPException: If database operation fails.
     """
     try:
-        # Generate UUID for the prompt
-        prompt_id = str(uuid.uuid4())
-        
+        # Normalize tags (ensure list, convert to JSON string for DB storage)
+        normalized_tags = []
+        if prompt.tags:
+            if isinstance(prompt.tags, str):
+                # Handle case where tags are passed as comma-separated string
+                normalized_tags = [
+                    tag.strip() for tag in prompt.tags.split(",") if tag.strip()
+                ]
+            elif isinstance(prompt.tags, list):
+                normalized_tags = [
+                    str(tag).strip() for tag in prompt.tags if str(tag).strip()
+                ]
+        tags_json = json.dumps(normalized_tags)
+
+        # Create new prompt instance
         new_prompt = Prompt(
-            id=prompt_id,
             tenant_id=prompt.tenant_id,
+            created_by=prompt.created_by,
             title=prompt.title,
             description=prompt.description,
-            created_by=user_id,
+            prompt_text=prompt.prompt_text,
+            is_archived=False,
+            tags=tags_json,
+            current_version_id=1,  # Always start at version 1
             created_at=datetime.now(tz=timezone.utc),
             updated_at=datetime.now(tz=timezone.utc),
         )
+
+        # Save to DB
         db.add(new_prompt)
-        db.flush()  # Ensure new_prompt.id is available
-
-        version_id = str(uuid.uuid4())
-        first_version = PromptVersion(
-            id=version_id,
-            prompt_id=new_prompt.id,
-            version_number=1,
-            body=prompt.body,
-            style=prompt.style,
-            created_by=user_id,
-            created_at=datetime.now(tz=timezone.utc),
-        )
-        db.add(first_version)
-        db.flush()
-
-        # Link prompt to its first version
-        new_prompt.current_version_id = first_version.id
-        db.commit()
-        db.refresh(new_prompt)
-
-        logger.info("Prompt created: id=%s, title=%s", new_prompt.id, new_prompt.title)
-        return new_prompt
-
-    except SQLAlchemyError as e:
-        db.rollback()
-        logger.error("Failed to create prompt: %s", str(e))
-        raise HTTPException(status_code=500, detail="Failed to create prompt")
-
-
-def get_prompts(db: Session, skip: int = 0, limit: int = 20) -> List[Prompt]:
-    """
-    Retrieve a paginated list of Prompts with eager loading.
-
-    Args:
-        db (Session): SQLAlchemy session.
-        skip (int): Offset for pagination.
-        limit (int): Maximum number of prompts to return.
-
-    Returns:
-        List[Prompt]: List of prompts.
-    """
-    result = db.execute(
-        select(Prompt)
-        .options(selectinload(Prompt.versions))
-        .offset(skip)
-        .limit(limit)
-    )
-    return result.scalars().all()
-
-
-def get_prompt(db: Session, prompt_id: str) -> Optional[Prompt]:
-    """
-    Retrieve a single Prompt by ID.
-
-    Args:
-        db (Session): SQLAlchemy session.
-        prompt_id (str): The prompt's ID.
-
-    Returns:
-        Optional[Prompt]: The Prompt if found, else None.
-    """
-    result = db.execute(
-        select(Prompt).filter(Prompt.id == prompt_id)
-    )
-    return result.scalars().first()
-
-
-def update_prompt(
-    db: Session,
-    prompt_id: str,
-    prompt_update: PromptUpdate,
-    user_id: Optional[str] = None,
-) -> Prompt:
-    """
-    Update a Prompt. 
-    - If `content` is provided, creates a new PromptVersion.
-    - If only `title` or `description` are provided, updates Prompt fields.
-    """
-    prompt = get_prompt(db, prompt_id)
-    if not prompt:
-        logger.warning("Update failed: prompt_id=%s not found", prompt_id)
-        raise HTTPException(status_code=404, detail=DETAIL)
-
-    try:
-        # Update Prompt fields if provided
-        if prompt_update.title is not None:
-            prompt.title = prompt_update.title
-        if prompt_update.description is not None:
-            prompt.description = prompt_update.description
-
-        # If content is provided, create a new version
-        if prompt_update.content is not None:
-            result = db.execute(
-                select(PromptVersion)
-                .filter(PromptVersion.prompt_id == prompt_id)
-                .order_by(PromptVersion.version_number.desc())
-            )
-            latest_version = result.scalars().first()
-            new_version_number = (latest_version.version_number + 1) if latest_version else 1
-
-            version_id = str(uuid.uuid4())
-            new_version = PromptVersion(
-                id=version_id,
-                prompt_id=prompt_id,
-                version_number=new_version_number,
-                body=prompt_update.content,   # ✅ correct mapping
-                created_by=user_id,
-                created_at=datetime.now(tz=timezone.utc),
-            )
-            db.add(new_version)
-            db.flush()
-
-            # Point prompt to the new current version
-            prompt.current_version_id = new_version.id
-
-        prompt.updated_at = datetime.now(tz=timezone.utc)
-
-        db.commit()
-        db.refresh(prompt)
-
-        logger.info("Prompt updated: id=%s", prompt_id)
-        return prompt
-
-    except SQLAlchemyError as e:
-        db.rollback()
-        logger.error("Failed to update prompt %s: %s", prompt_id, str(e))
-        raise HTTPException(status_code=500, detail="Failed to update prompt")
-
-
-def delete_prompt(db: Session, prompt_id: str) -> None:
-    """
-    Delete a Prompt and its associated versions.
-
-    Args:
-        db (Session): SQLAlchemy session.
-        prompt_id (str): ID of the prompt to delete.
-
-    Raises:
-        HTTPException: If the prompt does not exist or DB operation fails.
-    """
-    prompt = get_prompt(db, prompt_id)
-    if not prompt:
-        logger.warning("Delete failed: prompt_id=%s not found", prompt_id)
-        raise HTTPException(status_code=404, detail=DETAIL)
-
-    try:
-        db.delete(prompt)
-        db.commit()
-        logger.info("Prompt deleted: id=%s", prompt_id)
-    except SQLAlchemyError as e:
-        db.rollback()
-        logger.error("Failed to delete prompt %s: %s", prompt_id, str(e))
-        raise HTTPException(status_code=500, detail="Failed to delete prompt")
-
-
-def duplicate_prompt(
-    db: Session, prompt_id: str, user_id: Optional[str] = None
-) -> Prompt:
-    """
-    Duplicate a Prompt by creating a new prompt with its first version.
-
-    Args:
-        db (Session): SQLAlchemy session.
-        prompt_id (str): ID of the prompt to duplicate.
-        user_id (Optional[str]): ID of the user performing duplication.
-
-    Returns:
-        Prompt: The duplicated prompt.
-
-    Raises:
-        HTTPException: If the original prompt is not found or DB operation fails.
-    """
-    existing = get_prompt(db, prompt_id)
-    if not existing:
-        logger.warning("Duplicate failed: prompt_id=%s not found", prompt_id)
-        raise HTTPException(status_code=404, detail=DETAIL)
-
-    try:
-        # Get current version content for duplication
-        result = db.execute(
-            select(PromptVersion).filter(PromptVersion.id == existing.current_version_id)
-        )
-        latest_version = result.scalars().first()
-
-        new_prompt_id = str(uuid.uuid4())
-        new_prompt = Prompt(
-            id=new_prompt_id,
-            tenant_id=existing.tenant_id,
-            title=f"{existing.title}_copy",
-            description=existing.description,
-            created_by=user_id,
-            created_at=datetime.now(tz=timezone.utc),
-            updated_at=datetime.now(tz=timezone.utc),
-        )
-        db.add(new_prompt)
-        db.flush()
-
-        first_version_id = str(uuid.uuid4())
-        first_version = PromptVersion(
-            id=first_version_id,
-            prompt_id=new_prompt.id,
-            version_number=1,
-            body=latest_version.body if latest_version else "",
-            style=latest_version.style if latest_version else None,
-            created_by=user_id,
-            created_at=datetime.now(tz=timezone.utc),
-        )
-        db.add(first_version)
-        db.flush()
-
-        new_prompt.current_version_id = first_version.id
         db.commit()
         db.refresh(new_prompt)
 
         logger.info(
-            "Prompt duplicated: original_id=%s, new_id=%s",
-            prompt_id,
+            "Prompt created successfully with id=%s, tenant_id=%s",
             new_prompt.id,
+            new_prompt.tenant_id,
         )
         return new_prompt
 
     except SQLAlchemyError as e:
         db.rollback()
-        logger.error("Failed to duplicate prompt %s: %s", prompt_id, str(e))
-        raise HTTPException(status_code=500, detail="Failed to duplicate prompt")
-
-
-def rollback_prompt(
-    db: Session, prompt_id: str, version_number: int, user_id: Optional[str] = None
-) -> Prompt:
-    """
-    Rollback a Prompt to an older version by creating a new version from it.
-
-    Args:
-        db (Session): SQLAlchemy session.
-        prompt_id (str): ID of the prompt to rollback.
-        version_number (int): Version number to rollback to.
-        user_id (Optional[str]): ID of the user performing the rollback.
-
-    Returns:
-        Prompt: The prompt rolled back to the specified version.
-
-    Raises:
-        HTTPException: If the target version is not found or DB operation fails.
-    """
-    result = db.execute(
-        select(PromptVersion).filter(
-            PromptVersion.prompt_id == prompt_id,
-            PromptVersion.version_number == version_number,
+        logger.error("Database error while creating prompt: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Database error while creating prompt: {str(e)}"
         )
-    )
-    target = result.scalars().first()
-    if not target:
-        logger.warning(
-            "Rollback failed: prompt_id=%s, version=%s not found",
-            prompt_id,
-            version_number,
-        )
-        raise HTTPException(status_code=404, detail="Target version not found")
-
-    try:
-        result = db.execute(
-            select(PromptVersion)
-            .filter(PromptVersion.prompt_id == prompt_id)
-            .order_by(PromptVersion.version_number.desc())
-        )
-        latest_version = result.scalars().first()
-        new_version_number = (
-            (latest_version.version_number + 1) if latest_version else 1
-        )
-
-        rollback_version_id = str(uuid.uuid4())
-        new_version = PromptVersion(
-            id=rollback_version_id,
-            prompt_id=prompt_id,
-            version_number=new_version_number,
-            body=target.body,
-            style=target.style,
-            created_by=user_id,
-            created_at=datetime.now(tz=timezone.utc),
-        )
-        db.add(new_version)
-        db.flush()
-
-        prompt = get_prompt(db, prompt_id)
-        prompt.current_version_id = new_version.id
-        prompt.updated_at = datetime.now(tz=timezone.utc)
-
-        db.commit()
-        db.refresh(prompt)
-
-        logger.info(
-            "Prompt rolled back: id=%s, rolled_to_version=%s, new_version=%s",
-            prompt_id,
-            version_number,
-            new_version_number,
-        )
-        return prompt
-
-    except SQLAlchemyError as e:
+    except Exception as e:
         db.rollback()
         logger.error(
-            "Failed to rollback prompt %s to version %s: %s",
-            prompt_id,
-            version_number,
-            str(e),
+            "Unexpected error while creating prompt: %s", str(e), exc_info=True
         )
-        raise HTTPException(status_code=500, detail="Failed to rollback prompt")
+        raise HTTPException(
+            status_code=500, detail=f"Unexpected error while creating prompt: {str(e)}"
+        )
 
 
-def get_versions(db: Session, prompt_id: str) -> List[PromptVersion]:
+def list_prompts(
+    db: Session,
+    request: PromptListRequest,
+    title: Optional[str] = None,
+    is_archived: Optional[bool] = None,
+    tags: Optional[str] = None,
+    created_by: Optional[int] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+) -> List[PromptCreateResponse]:
     """
-    Retrieve all versions of a Prompt in ascending order.
+    Retrieve prompts with filtering, sorting, and pagination.
 
     Args:
-        db (Session): SQLAlchemy session.
-        prompt_id (str): ID of the prompt.
+        db (Session): Database session.
+        request (PromptListRequest): Contains tenant_id, offset, limit.
+        title (str, optional): Substring filter on title.
+        is_archived (bool, optional): Archived filter.
+        tags (str, optional): Comma-separated tags filter.
+        created_by (int, optional): Creator filter.
+        date_from (datetime, optional): Lower bound for created_at.
+        date_to (datetime, optional): Upper bound for created_at.
+        sort_by (str): Field to sort by (id, title, created_at, updated_at).
+        sort_order (str): Sorting direction ("asc" or "desc").
 
     Returns:
-        List[PromptVersion]: List of versions for the given prompt.
+        List[PromptCreateResponse]: Filtered and sorted prompt list.
+
+    Raises:
+        RuntimeError: On DB error or unexpected failure.
     """
-    result = db.execute(
-        select(PromptVersion)
-        .filter(PromptVersion.prompt_id == prompt_id)
-        .order_by(PromptVersion.version_number.asc())
-    )
-    return result.scalars().all()
+    try:
+        logger.debug(
+            "Service → Fetching prompts [tenant_id=%s, filters=%s]",
+            request.tenant_id,
+            {
+                "title": title,
+                "is_archived": is_archived,
+                "tags": tags,
+                "created_by": created_by,
+                "date_from": date_from,
+                "date_to": date_to,
+                "sort_by": sort_by,
+                "sort_order": sort_order,
+            },
+        )
+
+        query = db.query(Prompt).filter(Prompt.tenant_id == request.tenant_id)
+
+        # Filtering
+        if title:
+            query = query.filter(Prompt.title.ilike(f"%{title}%"))
+        if is_archived is not None:
+            query = query.filter(Prompt.is_archived == is_archived)
+        if created_by is not None:
+            query = query.filter(Prompt.created_by == created_by)
+        if date_from:
+            query = query.filter(Prompt.created_at >= date_from)
+        if date_to:
+            query = query.filter(Prompt.created_at <= date_to)
+        if tags:
+            tag_list = [t.strip().lower() for t in tags.split(",")]
+            query = query.filter(
+                or_(*[Prompt.tags.ilike(f"%{tag}%") for tag in tag_list])
+            )
+
+        # Sorting (default: created_at desc)
+        sort_field = getattr(Prompt, sort_by, Prompt.created_at)
+        query = query.order_by(
+            asc(sort_field) if sort_order.lower() == "asc" else desc(sort_field)
+        )
+
+        # Pagination
+        query = query.offset(request.offset).limit(request.limit)
+
+        results = query.all()
+
+        prompts: List[PromptCreateResponse] = [
+            PromptCreateResponse.model_validate(row, from_attributes=True)
+            for row in results
+        ]
+
+        logger.info(
+            "Service → Prompts retrieved [tenant_id=%s, count=%s]",
+            request.tenant_id,
+            len(prompts),
+        )
+
+        return prompts
+
+    except SQLAlchemyError as db_err:
+        logger.exception("DB error in list_prompts → %s", str(db_err))
+        raise RuntimeError("Database error while fetching prompts") from db_err
+    except Exception as e:
+        logger.exception("Unexpected error in list_prompts → %s", str(e))
+        raise RuntimeError("Unexpected error while fetching prompts") from e
+
+
+def get_prompt_by_id(db: Session, prompt_id: int) -> Optional[PromptCreateResponse]:
+    """
+    Retrieve a single prompt by its ID.
+
+    Optimized to fetch only one record and map it to the response schema.
+
+    Args:
+        db (Session): Active SQLAlchemy session.
+        prompt_id (int): Unique ID of the prompt.
+
+    Returns:
+        Optional[PromptCreateResponse]: The prompt object if found, else None.
+
+    Raises:
+        RuntimeError: On database failure or unexpected errors.
+    """
+    if prompt_id <= 0:
+        logger.error("Invalid prompt_id=%s provided to get_prompt_by_id", prompt_id)
+        raise ValueError("prompt_id must be a positive integer")
+
+    try:
+        logger.debug("Querying prompt [id=%s]", prompt_id)
+
+        # Use `get` for optimized primary key lookup
+        prompt: Optional[Prompt] = db.get(Prompt, prompt_id)
+
+        if not prompt:
+            logger.info("Prompt not found in DB [id=%s]", prompt_id)
+            return None
+
+        logger.debug("Prompt found [id=%s, title=%s]", prompt.id, prompt.title)
+
+        # Convert SQLAlchemy object to Pydantic schema
+        return PromptCreateResponse.model_validate(prompt, from_attributes=True)
+
+    except SQLAlchemyError as db_err:
+        logger.exception("Database error while fetching prompt [id=%s]: %s", prompt_id, str(db_err))
+        raise RuntimeError("Database error while fetching prompt") from db_err
+
+    except Exception as e:
+        logger.exception("Unexpected error in get_prompt_by_id [id=%s]: %s", prompt_id, str(e))
+        raise RuntimeError("Unexpected error while fetching prompt") from e

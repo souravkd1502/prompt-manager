@@ -54,24 +54,21 @@ Date
 """
 
 import logging
-from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Path
 from sqlalchemy.orm import Session
-from sqlalchemy import select
 
 from backend.core.database import get_db
-from backend.models.prompt import Prompt, PromptVersion
 from backend.services import prompt_service
 from backend.schemas.prompt_schemas import (
-    PromptCreate,
-    PromptUpdate,
-    PromptResponse,
-    PromptVersionCreate,
-    PromptVersionResponse,
-    PromptSearchRequest,
-    PromptSearchResponse,
+    PromptCreateRequest,
+    PromptCreateResponse,
+    PromptListRequest,
+    PromptListResponse,
 )
+
+from typing import Optional
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -82,10 +79,12 @@ router = APIRouter()
 # Test endpoint
 # ------------------------------
 
+
 @router.get("/test")
 def test_endpoint():
     """Test endpoint to verify API is working."""
     return {"message": "API is working", "status": "ok"}
+
 
 # ------------------------------
 # Prompt CRUD
@@ -93,409 +92,234 @@ def test_endpoint():
 
 
 @router.post(
-    "/v1/prompts", response_model=PromptResponse, status_code=status.HTTP_201_CREATED
+    "/v1/prompts",
+    response_model=PromptCreateResponse,
+    status_code=status.HTTP_201_CREATED,
 )
 def create_prompt(
-    prompt: PromptCreate, db: Session = Depends(get_db)
-) -> PromptResponse:
-    """
-    Create a new prompt (initial version = 1).
-    Roles: editor, admin
-    """
-    try:
-        logger.info("Creating new prompt: %s", prompt.name)
-
-        # Create a service-compatible PromptCreate object
-        class ServicePromptCreate:
-            def __init__(self, tenant_id: str, title: str, description: str, body: str, style: str):
-                self.tenant_id = tenant_id
-                self.title = title
-                self.description = description
-                self.body = body
-                self.style = style
-
-        service_prompt = ServicePromptCreate(
-            tenant_id=str(prompt.tenant_id),
-            title=prompt.name,
-            description=prompt.description,
-            body=prompt.content,
-            style=None
-        )
-
-        # Create prompt using service
-        created_prompt = prompt_service.create_prompt(db, service_prompt)
-
-        # Return response
-        return PromptResponse(
-            id=created_prompt.id,
-            name=created_prompt.title,
-            content=prompt.content,
-            tenant_id=int(created_prompt.tenant_id),
-            description=created_prompt.description,
-            version=1,
-            created_at=created_prompt.created_at,
-            updated_at=created_prompt.updated_at,
-        )
-    except Exception as e:
-        logger.error("Failed to create prompt: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to create prompt: {e}")
-
-
-@router.get("/v1/prompts", response_model=List[PromptResponse])
-def list_prompts(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(10, ge=1, le=100),
+    prompt: PromptCreateRequest,
     db: Session = Depends(get_db),
-) -> List[PromptResponse]:
+) -> PromptCreateResponse:
     """
-    List prompts with filters and pagination.
-    Roles: viewer+
+    Create a new Prompt (initial version = 1).
+
+    Roles:
+        - editor
+        - admin
+
+    Args:
+        prompt (PromptCreateRequest): Schema containing prompt data from client.
+        db (Session): SQLAlchemy database session.
+
+    Returns:
+        PromptCreateResponse: API response with created prompt details.
+
+    Raises:
+        HTTPException: On failure to create prompt or unexpected server errors.
     """
+    logger.info(
+        "API Request: Creating new prompt for tenant_id=%s, title=%s",
+        prompt.tenant_id,
+        prompt.title,
+    )
+
     try:
-        logger.debug("Listing prompts: skip=%s, limit=%s", skip, limit)
+        # Call service layer to handle DB creation
+        new_prompt = prompt_service.create_prompt(db, prompt)
 
-        # Get prompts from service
-        prompts = prompt_service.get_prompts(db, skip=skip, limit=limit)
-
-        # Convert to response format
-        response_prompts = []
-        for prompt in prompts:
-            # Get the current version content - look for the latest version
-            current_version = None
-            if prompt.current_version_id:
-                result = db.execute(
-                    select(PromptVersion).filter(
-                        PromptVersion.id == prompt.current_version_id
-                    )
-                )
-                current_version = result.scalars().first()
-            
-            # If no current version set, get the latest version
-            if not current_version:
-                result = db.execute(
-                    select(PromptVersion)
-                    .filter(PromptVersion.prompt_id == prompt.id)
-                    .order_by(PromptVersion.version_number.desc())
-                )
-                current_version = result.scalars().first()
-
-            response_prompts.append(
-                PromptResponse(
-                    id=prompt.id,
-                    name=prompt.title,
-                    content=current_version.body if current_version else "",
-                    tenant_id=int(prompt.tenant_id),
-                    description=prompt.description or "",
-                    version=current_version.version_number if current_version else 1,
-                    created_at=prompt.created_at,
-                    updated_at=prompt.updated_at,
-                    is_deleted=getattr(prompt, 'is_archived', False),
-                )
-            )
-
-        return response_prompts
-    except Exception as e:
-        logger.error("Failed to list prompts: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch prompts")
-
-
-@router.get("/v1/prompts/{prompt_id}", response_model=PromptResponse)
-def get_prompt(
-    prompt_id: str, db: Session = Depends(get_db)
-) -> PromptResponse:
-    """
-    Get details of a single prompt (latest version by default).
-    Roles: viewer+
-    """
-    try:
-        logger.info("Fetching prompt id=%s", prompt_id)
-
-        # Get prompt from service
-        prompt = prompt_service.get_prompt(db, prompt_id)
-        if not prompt:
-            raise HTTPException(status_code=404, detail="Prompt not found")
-
-        # Get the current version content
-        current_version = None
-        if prompt.current_version_id:
-            result = db.execute(
-                select(PromptVersion).filter(
-                    PromptVersion.id == prompt.current_version_id
-                )
-            )
-            current_version = result.scalars().first()
-
-        return PromptResponse(
-            id=prompt.id,
-            name=prompt.title,
-            content=current_version.body if current_version else "",
-            tenant_id=int(prompt.tenant_id),
-            description=prompt.description,
-            version=current_version.version_number if current_version else 1,
-            created_at=prompt.created_at,
-            updated_at=prompt.updated_at,
-            is_deleted=prompt.is_archived,
+        # Log success with identifiers
+        logger.info(
+            "Prompt created successfully: id=%s, tenant_id=%s, title=%s",
+            new_prompt.id,
+            new_prompt.tenant_id,
+            new_prompt.title,
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Failed to get prompt: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch prompt")
 
-
-@router.patch("/v1/prompts/{prompt_id}", response_model=PromptResponse)
-def update_prompt(
-    prompt_id: str, payload: PromptUpdate, db: Session = Depends(get_db)
-) -> PromptResponse:
-    """
-    Update prompt metadata (name, description).
-    Roles: editor, admin
-    """
-    try:
-        logger.info("Updating prompt id=%s", prompt_id)
-
-        # Pass the actual payload (PromptUpdate) to the service
-        updated_prompt = prompt_service.update_prompt(db, prompt_id, payload)
-
-        # Get the current version content
-        current_version = None
-        if updated_prompt.current_version_id:
-            result = db.execute(
-                select(PromptVersion).filter(
-                    PromptVersion.id == updated_prompt.current_version_id
-                )
-            )
-            current_version = result.scalars().first()
-
-        return PromptResponse(
-            id=updated_prompt.id,
-            name=updated_prompt.title,  # DB field
-            content=current_version.body if current_version else "",
-            tenant_id=int(updated_prompt.tenant_id),
-            description=updated_prompt.description,
-            version=current_version.version_number if current_version else 1,
-            created_at=updated_prompt.created_at,
-            updated_at=updated_prompt.updated_at,
-            is_deleted=updated_prompt.is_archived,
+        # Return structured API response
+        return PromptCreateResponse(
+            id=new_prompt.id,
+            tenant_id=new_prompt.tenant_id,
+            title=new_prompt.title,
+            description=new_prompt.description,
+            prompt_text=new_prompt.prompt_text,
+            is_archived=new_prompt.is_archived,
+            created_by=new_prompt.created_by,
+            current_version_id=new_prompt.current_version_id,
+            created_at=new_prompt.created_at,
+            updated_at=new_prompt.updated_at,
+            tags=new_prompt.tags,
         )
-    except HTTPException:
-        raise
+
+    except HTTPException as e:
+        # Service layer already handled/logged error → just re-raise
+        raise e
+
     except Exception as e:
-        logger.error("Failed to update prompt: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to update prompt")
-
-
-@router.delete("/v1/prompts/{prompt_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_prompt(prompt_id: str, db: Session = Depends(get_db)):
-    """
-    Delete a prompt (soft delete or permanent).
-    Roles: admin
-    """
-    try:
-        logger.warning("Deleting prompt id=%s", prompt_id)
-
-        # Delete prompt using service
-        prompt_service.delete_prompt(db, prompt_id)
-
-        return None
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Failed to delete prompt: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to delete prompt")
-
-
-# ------------------------------
-# Versioning
-# ------------------------------
-
-
-@router.post("/v1/prompts/{prompt_id}/versions", response_model=PromptVersionResponse)
-def create_version(
-    prompt_id: str, payload: PromptVersionCreate, db: Session = Depends(get_db)
-) -> PromptVersionResponse:
-    """
-    Create a new version of an existing prompt.
-    Roles: editor, admin
-    """
-    try:
-        logger.info("Creating new version for prompt id=%s", prompt_id)
-        from datetime import datetime
-        
-        # Fix validation errors: id should be string, created_at is required
-        return PromptVersionResponse(
-            id="1",  # Convert to string
-            version=2, 
-            content=payload.content,
-            description=payload.description,
-            created_at=datetime.now()  # Add required created_at field
+        # Catch any unexpected server-side errors
+        logger.exception(
+            "Unexpected error in API while creating prompt (tenant_id=%s, title=%s): %s",
+            prompt.tenant_id,
+            prompt.title,
+            str(e),
         )
-    except Exception as e:
-        logger.error("Failed to create version: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to create version")
-
-
-@router.get("/v1/prompts/{prompt_id}/versions", response_model=List[PromptVersionResponse])
-def list_versions(
-    prompt_id: str, db: Session = Depends(get_db)
-) -> List[PromptVersionResponse]:
-    """
-    List all versions of a prompt.
-    Roles: viewer+
-    """
-    try:
-        logger.debug("Listing versions for prompt id=%s", prompt_id)
-
-        # Get versions from service
-        versions = prompt_service.get_versions(db, prompt_id)
-
-        # Convert to response format
-        response_versions = []
-        for version in versions:
-            response_versions.append(
-                PromptVersionResponse(
-                    id=version.id,
-                    version=version.version_number,
-                    content=version.body,
-                    description=version.style,
-                    created_at=version.created_at,
-                )
-            )
-
-        return response_versions
-    except Exception as e:
-        logger.error("Failed to list versions: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch versions")
-
-
-@router.get("/v1/prompts/{prompt_id}/versions/{vid}", response_model=PromptVersionResponse)
-def get_version(
-    prompt_id: str, vid: int, db: Session = Depends(get_db)
-) -> PromptVersionResponse:
-    """
-    Get specific version details.
-    Roles: viewer+
-    """
-    try:
-        logger.debug("Getting version %s for prompt id=%s", vid, prompt_id)
-
-        # Get specific version
-        result = db.execute(
-            select(PromptVersion).filter(
-                PromptVersion.prompt_id == prompt_id,
-                PromptVersion.version_number == vid,
-            )
+        raise HTTPException(
+            status_code=500, detail="Unexpected server error while creating prompt"
         )
-        version = result.scalars().first()
-
-        if not version:
-            raise HTTPException(status_code=404, detail="Version not found")
-
-        return PromptVersionResponse(
-            id=version.id,
-            version=version.version_number,
-            content=version.body,
-            description=version.style,
-            created_at=version.created_at,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Failed to get version: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to fetch version")
 
 
-@router.delete(
-    "/v1/prompts/{prompt_id}/versions/{vid}", status_code=status.HTTP_204_NO_CONTENT
+@router.get(
+    "/v1/prompts",
+    response_model=PromptListResponse,
+    status_code=status.HTTP_200_OK,
 )
-def delete_version(prompt_id: str, vid: int, db: Session = Depends(get_db)):
+def list_prompts(
+    tenant_id: int = Query(..., description="ID of the tenant"),
+    offset: int = Query(0, description="Number of prompts to skip"),
+    limit: int = Query(100, description="Maximum number of prompts to return"),
+    title: Optional[str] = Query(None, description="Filter by title (substring match)"),
+    is_archived: Optional[bool] = Query(None, description="Filter by archived status"),
+    tags: Optional[str] = Query(None, description="Filter by comma-separated tags"),
+    created_by: Optional[int] = Query(None, description="Filter by creator user ID"),
+    date_from: Optional[datetime] = Query(None, description="Created at >= date"),
+    date_to: Optional[datetime] = Query(None, description="Created at <= date"),
+    sort_by: str = Query("created_at", description="Sort by field"),
+    sort_order: str = Query("desc", description="Sort order: asc or desc"),
+    db: Session = Depends(get_db),
+) -> PromptListResponse:
     """
-    Delete a specific version of a prompt.
-    Roles: admin
+    Retrieve a list of prompts with advanced filtering, sorting, and pagination.
+
+    Supported filters:
+        - tenant_id (required)
+        - title (substring match)
+        - is_archived (bool)
+        - tags (comma-separated)
+        - created_by (user ID)
+        - date_from/date_to (created_at range)
+
+    Sorting:
+        - sort_by: id, title, created_at, updated_at
+        - sort_order: asc | desc
+
+    Pagination:
+        - offset, limit
+
+    Args:
+        tenant_id (int): Tenant ID (mandatory).
+        offset (int): Records to skip (default=0).
+        limit (int): Max records to return (default=100).
+        title (str): Optional substring match filter for title.
+        is_archived (bool): Optional archived filter.
+        tags (str): Comma-separated tags for filtering.
+        created_by (int): Filter prompts by creator.
+        date_from (datetime): Lower bound for created_at.
+        date_to (datetime): Upper bound for created_at.
+        sort_by (str): Field to sort by.
+        sort_order (str): asc or desc.
+        db (Session): Database session.
+
+    Returns:
+        PromptListResponse: Paginated list of prompts with metadata.
     """
-    return None
+    logger.info(
+        "API Request → Listing prompts [tenant_id=%s, offset=%s, limit=%s, filters=%s]",
+        tenant_id,
+        offset,
+        limit,
+        {
+            "title": title,
+            "is_archived": is_archived,
+            "tags": tags,
+            "created_by": created_by,
+            "date_from": date_from,
+            "date_to": date_to,
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+        },
+    )
 
-
-# ------------------------------
-# Search & Filters
-# ------------------------------
-
-
-@router.post("/v1/prompts/search", response_model=PromptSearchResponse)
-def search_prompts(
-    payload: PromptSearchRequest, db: Session = Depends(get_db)
-) -> PromptSearchResponse:
-    """
-    Full-text search with filters (tags, date, tenant, version, etc.).
-    Roles: viewer+
-    """
     try:
-        logger.debug("Searching prompts with query: %s", payload.query)
-
-        # Build search query
-        query = select(Prompt).order_by(Prompt.created_at.desc())
-
-        # Apply text search filter
-        if payload.query:
-            query = query.filter(
-                Prompt.title.ilike(f"%{payload.query}%")
-                | Prompt.description.ilike(f"%{payload.query}%")
-            )
-
-        # Apply tenant filter
-        if payload.tenant_id:
-            query = query.filter(Prompt.tenant_id == str(payload.tenant_id))
-
-        # Apply date filters
-        if payload.created_after:
-            query = query.filter(Prompt.created_at >= payload.created_after)
-        if payload.created_before:
-            query = query.filter(Prompt.created_at <= payload.created_before)
-
-        # Apply pagination
-        offset = payload.offset or 0
-        limit = payload.limit or 20
-
-        # Get total count
-        count_query = select(Prompt).filter(
-            *query.whereclause.clauses if query.whereclause else []
+        request = PromptListRequest(
+            tenant_id=tenant_id,
+            offset=offset,
+            limit=limit,
         )
-        total_result = db.execute(count_query)
-        total = len(total_result.scalars().all())
 
-        # Get paginated results
-        search_query = query.offset(offset).limit(limit)
-        result = db.execute(search_query)
-        prompts = result.scalars().all()
+        prompts = prompt_service.list_prompts(
+            db=db,
+            request=request,
+            title=title,
+            is_archived=is_archived,
+            tags=tags,
+            created_by=created_by,
+            date_from=date_from,
+            date_to=date_to,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
 
-        # Convert to response format
-        response_prompts = []
-        for prompt in prompts:
-            # Get the current version content
-            current_version = None
-            if prompt.current_version_id:
-                version_result = db.execute(
-                    select(PromptVersion).filter(
-                        PromptVersion.id == prompt.current_version_id
-                    )
-                )
-                current_version = version_result.scalars().first()
+        total_prompts = len(prompts)
 
-            response_prompts.append(
-                PromptResponse(
-                    id=prompt.id,
-                    name=prompt.title,
-                    content=current_version.body if current_version else "",
-                    tenant_id=int(prompt.tenant_id),
-                    description=prompt.description,
-                    version=current_version.version_number if current_version else 1,
-                    created_at=prompt.created_at,
-                    updated_at=prompt.updated_at,
-                    is_deleted=prompt.is_archived,
-                )
+        return PromptListResponse(total=total_prompts, prompts=prompts)
+
+    except HTTPException as e:
+        logger.error("Handled HTTPException in list_prompts: %s", str(e))
+        raise e
+
+    except Exception as e:
+        logger.exception("Unexpected error in API list_prompts: %s", str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="Unexpected server error while listing prompts",
+        )
+
+
+@router.get(
+    "/v1/prompts/{prompt_id}",
+    response_model=PromptCreateResponse,
+    status_code=status.HTTP_200_OK,
+)
+def get_prompt(
+    prompt_id: int = Path(..., description="ID of the prompt to retrieve"),
+    db: Session = Depends(get_db),
+) -> PromptCreateResponse:
+    """
+    Retrieve a single prompt by its unique ID.
+
+    Args:
+        prompt_id (int): Unique ID of the prompt (path parameter).
+        db (Session): SQLAlchemy database session dependency.
+
+    Returns:
+        PromptCreateResponse: The prompt details if found.
+
+    Raises:
+        HTTPException (404): If the prompt does not exist.
+        HTTPException (500): If any unexpected server/database error occurs.
+    """
+    logger.info("API Request → Fetching prompt [id=%s]", prompt_id)
+
+    try:
+        prompt = prompt_service.get_prompt_by_id(db, prompt_id)
+
+        if not prompt:
+            logger.warning("Prompt not found [id=%s]", prompt_id)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Prompt with id={prompt_id} not found",
             )
 
-        return PromptSearchResponse(total=total, results=response_prompts)
+        logger.info("Prompt retrieved successfully [id=%s]", prompt_id)
+        return prompt
+
+    except HTTPException:
+        raise  # Re-raise known HTTP exceptions
+
     except Exception as e:
-        logger.error("Failed to search prompts: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to search prompts")
+        logger.exception(
+            "Unexpected error in API get_prompt [id=%s]: %s", prompt_id, str(e)
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unexpected server error while retrieving prompt",
+        )
